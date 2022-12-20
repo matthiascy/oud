@@ -47,14 +47,14 @@ pub async fn run() {
             .expect("failed to get document");
     }
 
-    let mut state = RenderState::new(&window).await;
+    let mut state = RenderState::new(&window, wgpu::Color::GREEN).await;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
             ref event,
             window_id,
         } if window_id == window.id() => {
-            if !state.process_input(event).consumed {
+            if !state.handle_input(event).is_handled() {
                 match event {
                     WindowEvent::CloseRequested
                     | WindowEvent::KeyboardInput {

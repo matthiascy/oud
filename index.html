@@ -9,15 +9,27 @@
       canvas {
           background-color: black;
       }
+      body {
+          height: 100%;
+      }
+      #oud-wasm {
+          display: flex;
+          margin: auto;
+          display: block;
+      }
     </style>
   </head>
 
-  <body id="oud-wasm">
+  <body>
     <script type="module">
       import init from './pkg/oud.js';
       init().then(() => {
         console.log("oud wasm loaded");
       });
     </script>
+    <div>
+      <div id="oud-wasm">
+      </div>
+    </div>
   </body>
 </html>
