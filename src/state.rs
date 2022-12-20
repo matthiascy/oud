@@ -1,8 +1,93 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::window::Window;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+}
+
+impl Vertex {
+    pub const SIZE: wgpu::BufferAddress = std::mem::size_of::<Vertex>() as wgpu::BufferAddress;
+
+    pub const fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: Self::SIZE,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ], // wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+        }
+    }
+}
+
+const TRIANGLE_VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [-0.5, -0.5, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, -0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [0.0, 0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+];
+
+const HEXAGON_VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [1.0, 0.0, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, -0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [-0.5, -0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+    Vertex {
+        position: [-1.0, 0.0, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [-0.5, 0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, 0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+];
+
+pub struct SlicedBuffer {
+    buf: wgpu::Buffer,
+    #[allow(dead_code)]
+    cap: wgpu::BufferAddress,
+    slices: Vec<Range<wgpu::BufferAddress>>,
+}
+
+const INITIAL_VERTEX_BUFFER_SIZE: wgpu::BufferAddress =
+    std::mem::size_of::<Vertex>() as wgpu::BufferAddress * 1024;
+const INITIAL_INDEX_BUFFER_SIZE: wgpu::BufferAddress =
+    std::mem::size_of::<u32>() as wgpu::BufferAddress * 1024;
 
 pub struct RenderState {
     #[allow(dead_code)]
@@ -17,6 +102,8 @@ pub struct RenderState {
     clear_color: wgpu::Color,
     pipelines: HashMap<&'static str, wgpu::RenderPipeline>,
     pub current_pipeline: &'static str,
+    pub vertex_buffer: SlicedBuffer,
+    pub index_buffer: SlicedBuffer,
 }
 
 impl RenderState {
@@ -85,6 +172,60 @@ impl RenderState {
         };
         surface.configure(&device, &surface_config);
 
+        let mut vertex_buffer = {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vertex-buffer"),
+                size: INITIAL_VERTEX_BUFFER_SIZE,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            SlicedBuffer {
+                buf,
+                cap: INITIAL_VERTEX_BUFFER_SIZE,
+                slices: Vec::new(),
+            }
+        };
+
+        let mut offset: wgpu::BufferAddress = 0;
+        let triangle_vertex_buffer_size =
+            TRIANGLE_VERTICES.len() as wgpu::BufferAddress * Vertex::SIZE;
+        vertex_buffer
+            .slices
+            .push(offset..offset + triangle_vertex_buffer_size);
+        offset += triangle_vertex_buffer_size;
+
+        let hexagon_vertex_buffer_size =
+            HEXAGON_VERTICES.len() as wgpu::BufferAddress * Vertex::SIZE;
+        vertex_buffer
+            .slices
+            .push(offset..offset + hexagon_vertex_buffer_size);
+
+        queue.write_buffer(
+            &vertex_buffer.buf,
+            0,
+            bytemuck::cast_slice(TRIANGLE_VERTICES),
+        );
+
+        let mut index_buffer = {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("index-buffer"),
+                size: INITIAL_INDEX_BUFFER_SIZE,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            SlicedBuffer {
+                buf,
+                cap: INITIAL_INDEX_BUFFER_SIZE,
+                slices: Vec::new(),
+            }
+        };
+
+        index_buffer
+            .slices
+            .push(0..3 * std::mem::size_of::<u32>() as wgpu::BufferAddress);
+
+        queue.write_buffer(&index_buffer.buf, 0, bytemuck::cast_slice(&[0, 1, 2]));
+
         let default_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("default-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("./shaders/default.wgsl").into()),
@@ -108,7 +249,7 @@ impl RenderState {
             vertex: wgpu::VertexState {
                 module: &default_shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[Vertex::layout()],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -154,7 +295,7 @@ impl RenderState {
             vertex: wgpu::VertexState {
                 module: &variant_shader,
                 entry_point: "vs_main",
-                buffers: &[],
+                buffers: &[Vertex::layout()],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -177,16 +318,8 @@ impl RenderState {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_config.format,
                     blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::Zero,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::Zero,
-                            operation: wgpu::BlendOperation::Add,
-                        },
+                        color: wgpu::BlendComponent::REPLACE,
+                        alpha: wgpu::BlendComponent::REPLACE,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -209,6 +342,7 @@ impl RenderState {
             clear_color,
             pipelines,
             current_pipeline: "default",
+            vertex_buffer,
         }
     }
 
@@ -272,7 +406,6 @@ impl RenderState {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("main-render-encoder"),
             });
-
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-render-pass"),
@@ -287,7 +420,13 @@ impl RenderState {
                 depth_stencil_attachment: None,
             });
             render_pass.set_pipeline(&self.pipelines[self.current_pipeline]);
-            render_pass.draw(0..3, 0..1);
+            for vertex_range in &self.vertex_buffer.slices {
+                let buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
+                let count = (vertex_range.end - vertex_range.start) / Vertex::SIZE;
+                render_pass.set_vertex_buffer(0, buffer);
+                //   render_pass.draw(0..count as u32, 0..1);
+                render_pass.draw_indexed(indices, base_vertex, instances)
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
