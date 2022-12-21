@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::window::Window;
+
+use crate::texture::Texture;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
+    pub tex_coords: [f32; 2],
 }
 
 impl Vertex {
@@ -30,60 +34,79 @@ impl Vertex {
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
             ], // wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
         }
     }
 }
 
+type Idx = u32;
+const IDX_SIZE: wgpu::BufferAddress = std::mem::size_of::<Idx>() as wgpu::BufferAddress;
+const IDX_FORMAT: wgpu::IndexFormat = wgpu::IndexFormat::Uint32;
+
 const TRIANGLE_VERTICES: &[Vertex] = &[
     Vertex {
         position: [-0.5, -0.5, 0.0],
         color: [1.0, 0.0, 0.0],
+        tex_coords: [0.0, 0.0],
     },
     Vertex {
         position: [0.5, -0.5, 0.0],
         color: [0.0, 1.0, 0.0],
+        tex_coords: [1.0, 0.0],
     },
     Vertex {
         position: [0.0, 0.5, 0.0],
         color: [0.0, 0.0, 1.0],
+        tex_coords: [0.5, 1.0],
     },
 ];
 
-const TRIANGLE_INDICES: &[u32] = &[0, 1, 2];
+const TRIANGLE_INDICES: &[Idx] = &[0, 1, 2];
 
 const HEXAGON_VERTICES: &[Vertex] = &[
     Vertex {
         position: [0.5, 0.5, 0.0],
         color: [0.0, 0.0, 1.0],
+        tex_coords: [0.3, 0.4],
     },
     Vertex {
         position: [0.8, 0.3, 0.0],
         color: [0.0, 1.0, 0.0],
+        tex_coords: [0.6, 0.2],
     },
     Vertex {
         position: [0.5, 0.2, 0.0],
         color: [0.0, 0.0, 1.0],
+        tex_coords: [0.3, 0.0],
     },
     Vertex {
         position: [0.2, 0.3, 0.0],
         color: [1.0, 0.0, 0.0],
+        tex_coords: [0.0, 0.2],
     },
     Vertex {
         position: [0.2, 0.7, 0.0],
         color: [1.0, 0.0, 0.0],
+        tex_coords: [0.0, 0.6],
     },
     Vertex {
         position: [0.5, 0.8, 0.0],
         color: [0.0, 0.0, 1.0],
+        tex_coords: [0.3, 1.0],
     },
     Vertex {
         position: [0.8, 0.7, 0.0],
         color: [0.0, 1.0, 0.0],
+        tex_coords: [0.6, 0.8],
     },
 ];
 
-const HEXAGON_INDICES: &[u32] = &[0, 1, 6, 0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 0, 6, 5];
+const HEXAGON_INDICES: &[Idx] = &[0, 1, 6, 0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 0, 6, 5];
 
 pub struct SlicedBuffer {
     buf: wgpu::Buffer,
@@ -92,10 +115,8 @@ pub struct SlicedBuffer {
     slices: Vec<Range<wgpu::BufferAddress>>,
 }
 
-const INITIAL_VERTEX_BUFFER_SIZE: wgpu::BufferAddress =
-    std::mem::size_of::<Vertex>() as wgpu::BufferAddress * 1024;
-const INITIAL_INDEX_BUFFER_SIZE: wgpu::BufferAddress =
-    std::mem::size_of::<u32>() as wgpu::BufferAddress * 1024;
+const INITIAL_VERTEX_BUFFER_SIZE: wgpu::BufferAddress = Vertex::SIZE * 1024;
+const INITIAL_INDEX_BUFFER_SIZE: wgpu::BufferAddress = IDX_SIZE * 1024;
 
 pub struct RenderState {
     #[allow(dead_code)]
@@ -112,6 +133,9 @@ pub struct RenderState {
     pub current_pipeline: &'static str,
     pub vertex_buffer: SlicedBuffer,
     pub index_buffer: SlicedBuffer,
+    textures: Vec<Texture>,
+    bind_groups: Vec<wgpu::BindGroup>,
+    texture_idx: usize,
 }
 
 impl RenderState {
@@ -217,6 +241,7 @@ impl RenderState {
             bytemuck::cast_slice(HEXAGON_VERTICES),
         );
 
+        println!("preparing index buffer");
         let mut index_buffer = {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("index-buffer"),
@@ -231,25 +256,114 @@ impl RenderState {
             }
         };
         offset = 0;
-        index_buffer
-            .slices
-            .push(offset..offset + 3 * std::mem::size_of::<u32>() as wgpu::BufferAddress);
+        index_buffer.slices.push(offset..offset + 3 * IDX_SIZE);
         queue.write_buffer(
             &index_buffer.buf,
             offset,
             bytemuck::cast_slice(&TRIANGLE_INDICES),
         );
-        offset += 3 * std::mem::size_of::<u32>() as wgpu::BufferAddress;
-        index_buffer.slices.push(
-            offset
-                ..offset
-                    + (HEXAGON_INDICES.len() * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
-        );
+        offset += 3 * IDX_SIZE;
+        index_buffer
+            .slices
+            .push(offset..offset + HEXAGON_INDICES.len() as wgpu::BufferAddress * IDX_SIZE);
         queue.write_buffer(
             &index_buffer.buf,
             offset,
-            bytemuck::cast_slice(HEXAGON_INDICES),
+            bytemuck::cast_slice(&HEXAGON_INDICES),
         );
+
+        let textures = {
+            #[cfg(target_arch = "wasm32")]
+            {
+                vec![
+                    Texture::from_bytes(
+                        &device,
+                        &queue,
+                        include_bytes!("../assets/cliff.jpg"),
+                        "texture-cliff",
+                    ),
+                    Texture::from_bytes(
+                        &device,
+                        &queue,
+                        include_bytes!("../assets/ground.jpg"),
+                        "texture-ground",
+                    ),
+                ]
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                vec![
+                    Texture::from_file(
+                        &device,
+                        &queue,
+                        Path::new("./assets/cliff.jpg"),
+                        "tex-cliff",
+                    ),
+                    Texture::from_file(
+                        &device,
+                        &queue,
+                        Path::new("./assets/ground.jpg"),
+                        "tex-ground",
+                    ),
+                ]
+            }
+        };
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bind-group-layout"),
+            entries: &[
+                // Sampled texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Texture sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Matches the filterable field of the texture entry above.
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_groups = vec![
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bind-group-texture-0"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&textures[0].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&textures[0].sampler),
+                    },
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bind-group-texture-1"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&textures[1].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&textures[1].sampler),
+                    },
+                ],
+            }),
+        ];
 
         let default_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("default-shader"),
@@ -264,7 +378,7 @@ impl RenderState {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("default-render-pipeline-layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -369,6 +483,9 @@ impl RenderState {
             current_pipeline: "default",
             vertex_buffer,
             index_buffer,
+            textures,
+            bind_groups,
+            texture_idx: 0,
         }
     }
 
@@ -403,16 +520,23 @@ impl RenderState {
                 match input {
                     KeyboardInput {
                         state: ElementState::Pressed,
-                        virtual_keycode: Some(VirtualKeyCode::Space),
+                        virtual_keycode: Some(key),
                         ..
-                    } => {
-                        self.current_pipeline = match self.current_pipeline {
-                            "default" => "variant",
-                            "variant" => "default",
-                            _ => "default",
-                        };
-                        Response::Handled
-                    }
+                    } => match key {
+                        VirtualKeyCode::Space => {
+                            self.current_pipeline = match self.current_pipeline {
+                                "default" => "variant",
+                                "variant" => "default",
+                                _ => "default",
+                            };
+                            Response::Handled
+                        }
+                        VirtualKeyCode::T => {
+                            self.texture_idx = (self.texture_idx + 1) % self.textures.len();
+                            Response::Handled
+                        }
+                        _ => Response::Ignored,
+                    },
                     _ => Response::Ignored,
                 }
             }
@@ -446,32 +570,24 @@ impl RenderState {
                 depth_stencil_attachment: None,
             });
             render_pass.set_pipeline(&self.pipelines[self.current_pipeline]);
-            // for vertex_range in &self.vertex_buffer.slices {
-            //     let buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
-            //     let count = (vertex_range.end - vertex_range.start) / Vertex::SIZE;
-            //     render_pass.set_vertex_buffer(0, buffer);
-            //   render_pass.draw(0..count as u32, 0..1);
-            // }
+            render_pass.set_bind_group(0, &self.bind_groups[self.texture_idx], &[]);
+            render_pass.set_index_buffer(self.index_buffer.buf.slice(..), IDX_FORMAT);
 
             #[cfg(not(target_arch = "wasm32"))]
             {
                 // Only bind once the vertex buffer and index buffer,
                 // then draw the different slices with vertex and index offset.
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.buf.slice(..));
-                render_pass
-                    .set_index_buffer(self.index_buffer.buf.slice(..), wgpu::IndexFormat::Uint32);
                 self.index_buffer
                     .slices
                     .iter()
                     .enumerate()
                     .for_each(|(i, index_range)| {
-                        let count = (index_range.end - index_range.start)
-                            / std::mem::size_of::<u32>() as u64;
-                        let index_offset =
-                            (index_range.start / std::mem::size_of::<u32>() as u64) as u32;
+                        let count = ((index_range.end - index_range.start) / IDX_SIZE) as u32;
+                        let index_offset = (index_range.start / IDX_SIZE) as u32;
                         let vertex_offset = self.vertex_buffer.slices[i].start / Vertex::SIZE;
                         render_pass.draw_indexed(
-                            index_offset..index_offset + count as u32,
+                            index_offset..index_offset + count,
                             vertex_offset as i32,
                             0..1,
                         );
@@ -481,18 +597,14 @@ impl RenderState {
             #[cfg(target_arch = "wasm32")]
             {
                 // Draw elements with base vertex is not supported using webgl.
-                render_pass
-                    .set_index_buffer(self.index_buffer.buf.slice(..), wgpu::IndexFormat::Uint32);
                 self.index_buffer
                     .slices
                     .iter()
                     .zip(self.vertex_buffer.slices.iter())
                     .for_each(|(index_range, vertex_range)| {
                         let vertex_buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
-                        let index_offset =
-                            (index_range.start / std::mem::size_of::<u32>() as u64) as u32;
-                        let count = (index_range.end - index_range.start)
-                            / std::mem::size_of::<u32>() as u64;
+                        let index_offset = (index_range.start / IDX_SIZE) as u32;
+                        let count = (index_range.end - index_range.start) / IDX_SIZE;
                         render_pass.set_vertex_buffer(0, vertex_buffer);
                         render_pass.draw_indexed(
                             index_offset..index_offset + count as u32,

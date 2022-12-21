@@ -1,4 +1,5 @@
 mod state;
+mod texture;
 
 use winit::{
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
