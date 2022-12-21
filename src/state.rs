@@ -50,32 +50,40 @@ const TRIANGLE_VERTICES: &[Vertex] = &[
     },
 ];
 
+const TRIANGLE_INDICES: &[u32] = &[0, 1, 2];
+
 const HEXAGON_VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [1.0, 0.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    },
-    Vertex {
-        position: [0.5, -0.5, 0.0],
-        color: [0.0, 1.0, 0.0],
-    },
-    Vertex {
-        position: [-0.5, -0.5, 0.0],
-        color: [0.0, 0.0, 1.0],
-    },
-    Vertex {
-        position: [-1.0, 0.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    },
-    Vertex {
-        position: [-0.5, 0.5, 0.0],
-        color: [0.0, 1.0, 0.0],
-    },
     Vertex {
         position: [0.5, 0.5, 0.0],
         color: [0.0, 0.0, 1.0],
     },
+    Vertex {
+        position: [0.8, 0.3, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, 0.2, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+    Vertex {
+        position: [0.2, 0.3, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [0.2, 0.7, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, 0.8, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+    Vertex {
+        position: [0.8, 0.7, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
 ];
+
+const HEXAGON_INDICES: &[u32] = &[0, 1, 6, 0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 0, 6, 5];
 
 pub struct SlicedBuffer {
     buf: wgpu::Buffer,
@@ -192,18 +200,21 @@ impl RenderState {
         vertex_buffer
             .slices
             .push(offset..offset + triangle_vertex_buffer_size);
+        queue.write_buffer(
+            &vertex_buffer.buf,
+            0,
+            bytemuck::cast_slice(TRIANGLE_VERTICES),
+        );
         offset += triangle_vertex_buffer_size;
-
         let hexagon_vertex_buffer_size =
             HEXAGON_VERTICES.len() as wgpu::BufferAddress * Vertex::SIZE;
         vertex_buffer
             .slices
             .push(offset..offset + hexagon_vertex_buffer_size);
-
         queue.write_buffer(
             &vertex_buffer.buf,
-            0,
-            bytemuck::cast_slice(TRIANGLE_VERTICES),
+            offset,
+            bytemuck::cast_slice(HEXAGON_VERTICES),
         );
 
         let mut index_buffer = {
@@ -219,12 +230,26 @@ impl RenderState {
                 slices: Vec::new(),
             }
         };
-
+        offset = 0;
         index_buffer
             .slices
-            .push(0..3 * std::mem::size_of::<u32>() as wgpu::BufferAddress);
-
-        queue.write_buffer(&index_buffer.buf, 0, bytemuck::cast_slice(&[0, 1, 2]));
+            .push(offset..offset + 3 * std::mem::size_of::<u32>() as wgpu::BufferAddress);
+        queue.write_buffer(
+            &index_buffer.buf,
+            offset,
+            bytemuck::cast_slice(&TRIANGLE_INDICES),
+        );
+        offset += 3 * std::mem::size_of::<u32>() as wgpu::BufferAddress;
+        index_buffer.slices.push(
+            offset
+                ..offset
+                    + (HEXAGON_INDICES.len() * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
+        );
+        queue.write_buffer(
+            &index_buffer.buf,
+            offset,
+            bytemuck::cast_slice(HEXAGON_INDICES),
+        );
 
         let default_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("default-shader"),
@@ -343,6 +368,7 @@ impl RenderState {
             pipelines,
             current_pipeline: "default",
             vertex_buffer,
+            index_buffer,
         }
     }
 
@@ -420,12 +446,60 @@ impl RenderState {
                 depth_stencil_attachment: None,
             });
             render_pass.set_pipeline(&self.pipelines[self.current_pipeline]);
-            for vertex_range in &self.vertex_buffer.slices {
-                let buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
-                let count = (vertex_range.end - vertex_range.start) / Vertex::SIZE;
-                render_pass.set_vertex_buffer(0, buffer);
-                //   render_pass.draw(0..count as u32, 0..1);
-                render_pass.draw_indexed(indices, base_vertex, instances)
+            // for vertex_range in &self.vertex_buffer.slices {
+            //     let buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
+            //     let count = (vertex_range.end - vertex_range.start) / Vertex::SIZE;
+            //     render_pass.set_vertex_buffer(0, buffer);
+            //   render_pass.draw(0..count as u32, 0..1);
+            // }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // Only bind once the vertex buffer and index buffer,
+                // then draw the different slices with vertex and index offset.
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.buf.slice(..));
+                render_pass
+                    .set_index_buffer(self.index_buffer.buf.slice(..), wgpu::IndexFormat::Uint32);
+                self.index_buffer
+                    .slices
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, index_range)| {
+                        let count = (index_range.end - index_range.start)
+                            / std::mem::size_of::<u32>() as u64;
+                        let index_offset =
+                            (index_range.start / std::mem::size_of::<u32>() as u64) as u32;
+                        let vertex_offset = self.vertex_buffer.slices[i].start / Vertex::SIZE;
+                        render_pass.draw_indexed(
+                            index_offset..index_offset + count as u32,
+                            vertex_offset as i32,
+                            0..1,
+                        );
+                    });
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Draw elements with base vertex is not supported using webgl.
+                render_pass
+                    .set_index_buffer(self.index_buffer.buf.slice(..), wgpu::IndexFormat::Uint32);
+                self.index_buffer
+                    .slices
+                    .iter()
+                    .zip(self.vertex_buffer.slices.iter())
+                    .for_each(|(index_range, vertex_range)| {
+                        let vertex_buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
+                        let index_offset =
+                            (index_range.start / std::mem::size_of::<u32>() as u64) as u32;
+                        let count = (index_range.end - index_range.start)
+                            / std::mem::size_of::<u32>() as u64;
+                        render_pass.set_vertex_buffer(0, vertex_buffer);
+                        render_pass.draw_indexed(
+                            index_offset..index_offset + count as u32,
+                            0,
+                            0..1,
+                        );
+                    });
             }
         }
 
