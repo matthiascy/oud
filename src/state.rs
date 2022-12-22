@@ -119,6 +119,23 @@ pub struct SlicedBuffer {
 const INITIAL_VERTEX_BUFFER_SIZE: wgpu::BufferAddress = Vertex::SIZE * 1024;
 const INITIAL_INDEX_BUFFER_SIZE: wgpu::BufferAddress = IDX_SIZE * 1024;
 
+pub struct InstanceParams {
+    pub position: glam::Vec3,
+    pub rotation: glam::Quat,
+}
+
+impl InstanceParams {
+    pub fn new(position: glam::Vec3, rotation: glam::Quat) -> Self {
+        Self { position, rotation }
+    }
+
+    pub fn into_array(self) -> [f32; 16] {
+        glam::Mat4::from_rotation_translation(self.rotation, self.position).to_cols_array()
+    }
+}
+
+const NUM_INSTANCES_PER_ROW: usize = 8;
+
 pub struct RenderState {
     #[allow(dead_code)]
     instance: wgpu::Instance,
@@ -141,6 +158,8 @@ pub struct RenderState {
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
     camera_uniform_buffer: wgpu::Buffer,
+    object_instances: Vec<InstanceParams>,
+    object_instances_buffer: wgpu::Buffer,
 }
 
 impl RenderState {
