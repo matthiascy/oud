@@ -6,6 +6,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::window::Window;
 
+use crate::camera::{Camera, CameraController, CameraUniform};
 use crate::texture::Texture;
 
 #[repr(C)]
@@ -134,8 +135,12 @@ pub struct RenderState {
     pub vertex_buffer: SlicedBuffer,
     pub index_buffer: SlicedBuffer,
     textures: Vec<Texture>,
-    bind_groups: Vec<wgpu::BindGroup>,
+    bind_groups: HashMap<&'static str, Vec<wgpu::BindGroup>>,
     texture_idx: usize,
+    camera: Camera,
+    camera_controller: CameraController,
+    camera_uniform: CameraUniform,
+    camera_uniform_buffer: wgpu::Buffer,
 }
 
 impl RenderState {
@@ -275,6 +280,7 @@ impl RenderState {
         let textures = {
             #[cfg(target_arch = "wasm32")]
             {
+                log::info!("loading textures");
                 vec![
                     Texture::from_bytes(
                         &device,
@@ -285,8 +291,8 @@ impl RenderState {
                     Texture::from_bytes(
                         &device,
                         &queue,
-                        include_bytes!("../assets/ground.jpg"),
-                        "texture-ground",
+                        include_bytes!("../assets/brick.jpg"),
+                        "texture-brick",
                     ),
                 ]
             }
@@ -309,35 +315,74 @@ impl RenderState {
             }
         };
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bind-group-layout"),
-            entries: &[
-                // Sampled texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Texture sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    // Matches the filterable field of the texture entry above.
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+        let camera = Camera {
+            eye: glam::Vec3::new(0.0, 1.0, 2.0),
+            target: glam::Vec3::ZERO,
+            up: glam::Vec3::Y,
+            aspect: surface_config.width as f32 / surface_config.height as f32,
+            vfov: 45.0_f32,
+            near: 0.1,
+            far: 100.0,
+        };
+
+        let camera_controller = CameraController::new(0.1);
+
+        let mut camera_uniform = CameraUniform::new();
+        camera_uniform.update_view_proj(&camera);
+
+        use wgpu::util::DeviceExt;
+
+        let camera_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera-uniform-buffer"),
+            contents: bytemuck::cast_slice(&[camera_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let bind_groups = vec![
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture-bind-group-layout"),
+                entries: &[
+                    // Sampled texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Texture sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        // Matches the filterable field of the texture entry above.
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let camera_uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("camera-uniform-bind-group-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let texture_bind_groups = vec![
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bind-group-texture-0"),
-                layout: &bind_group_layout,
+                layout: &texture_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -351,7 +396,7 @@ impl RenderState {
             }),
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bind-group-texture-1"),
-                layout: &bind_group_layout,
+                layout: &texture_bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -364,6 +409,15 @@ impl RenderState {
                 ],
             }),
         ];
+
+        let camera_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera-uniform-bind-group"),
+            layout: &camera_uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform_buffer.as_entire_binding(),
+            }],
+        });
 
         let default_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("default-shader"),
@@ -378,7 +432,10 @@ impl RenderState {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("default-render-pipeline-layout"),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[
+                    &texture_bind_group_layout,
+                    &camera_uniform_bind_group_layout,
+                ],
                 push_constant_ranges: &[],
             });
 
@@ -470,6 +527,10 @@ impl RenderState {
         pipelines.insert("default", default_pipeline);
         pipelines.insert("variant", variant_pipeline);
 
+        let mut bind_groups = HashMap::new();
+        bind_groups.insert("texture", texture_bind_groups);
+        bind_groups.insert("camera", vec![camera_uniform_bind_group]);
+
         Self {
             surface,
             device,
@@ -486,6 +547,10 @@ impl RenderState {
             textures,
             bind_groups,
             texture_idx: 0,
+            camera,
+            camera_controller,
+            camera_uniform,
+            camera_uniform_buffer,
         }
     }
 
@@ -500,51 +565,63 @@ impl RenderState {
 
     #[allow(unused_variables)]
     pub fn handle_input(&mut self, event: &WindowEvent) -> Response {
-        match event {
-            WindowEvent::MouseInput { state, button, .. } => {
-                print!("MouseInput: {:?} {:?}\r", state, button);
-                Response::Handled
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                print!("CursorMoved: {:?}\r", position);
-                self.clear_color = wgpu::Color {
-                    r: position.x as f64 / self.size.width as f64,
-                    g: position.y as f64 / self.size.height as f64,
-                    b: 0.5,
-                    a: 1.0,
-                };
-                Response::Handled
-            }
-            WindowEvent::KeyboardInput { input, .. } => {
-                print!("KeyboardInput: {:?}\r", input);
-                match input {
-                    KeyboardInput {
-                        state: ElementState::Pressed,
-                        virtual_keycode: Some(key),
-                        ..
-                    } => match key {
-                        VirtualKeyCode::Space => {
-                            self.current_pipeline = match self.current_pipeline {
-                                "default" => "variant",
-                                "variant" => "default",
-                                _ => "default",
-                            };
-                            Response::Handled
-                        }
-                        VirtualKeyCode::T => {
-                            self.texture_idx = (self.texture_idx + 1) % self.textures.len();
-                            Response::Handled
-                        }
-                        _ => Response::Ignored,
-                    },
-                    _ => Response::Ignored,
+        if self.camera_controller.process_events(event).is_ignored() {
+            match event {
+                WindowEvent::MouseInput { state, button, .. } => {
+                    print!("MouseInput: {:?} {:?}\r", state, button);
+                    Response::Handled
                 }
+                WindowEvent::CursorMoved { position, .. } => {
+                    print!("CursorMoved: {:?}\r", position);
+                    self.clear_color = wgpu::Color {
+                        r: position.x as f64 / self.size.width as f64,
+                        g: position.y as f64 / self.size.height as f64,
+                        b: 0.5,
+                        a: 1.0,
+                    };
+                    Response::Handled
+                }
+                WindowEvent::KeyboardInput { input, .. } => {
+                    print!("KeyboardInput: {:?}\r", input);
+                    match input {
+                        KeyboardInput {
+                            state: ElementState::Pressed,
+                            virtual_keycode: Some(key),
+                            ..
+                        } => match key {
+                            VirtualKeyCode::Space => {
+                                self.current_pipeline = match self.current_pipeline {
+                                    "default" => "variant",
+                                    "variant" => "default",
+                                    _ => "default",
+                                };
+                                Response::Handled
+                            }
+                            VirtualKeyCode::T => {
+                                self.texture_idx = (self.texture_idx + 1) % self.textures.len();
+                                Response::Handled
+                            }
+                            _ => Response::Ignored,
+                        },
+                        _ => Response::Ignored,
+                    }
+                }
+                _ => Response::Ignored,
             }
-            _ => Response::Ignored,
+        } else {
+            Response::Ignored
         }
     }
 
-    pub fn update(&mut self) {}
+    pub fn update(&mut self) {
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera_uniform.update_view_proj(&self.camera);
+        self.queue.write_buffer(
+            &self.camera_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+    }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
@@ -570,7 +647,8 @@ impl RenderState {
                 depth_stencil_attachment: None,
             });
             render_pass.set_pipeline(&self.pipelines[self.current_pipeline]);
-            render_pass.set_bind_group(0, &self.bind_groups[self.texture_idx], &[]);
+            render_pass.set_bind_group(0, &self.bind_groups["texture"][self.texture_idx], &[]);
+            render_pass.set_bind_group(1, &self.bind_groups["camera"][0], &[]);
             render_pass.set_index_buffer(self.index_buffer.buf.slice(..), IDX_FORMAT);
 
             #[cfg(not(target_arch = "wasm32"))]

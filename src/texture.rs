@@ -15,6 +15,7 @@ impl Texture {
     ) -> Self {
         let data = image::load_from_memory(bytes).unwrap().to_rgba8();
         let (width, height) = data.dimensions();
+        log::info!("Loaded texture {} with size {}x{}", label, width, height);
         let size = wgpu::Extent3d {
             width,
             height,
