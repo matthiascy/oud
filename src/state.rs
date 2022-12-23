@@ -119,12 +119,16 @@ pub struct SlicedBuffer {
 const INITIAL_VERTEX_BUFFER_SIZE: wgpu::BufferAddress = Vertex::SIZE * 1024;
 const INITIAL_INDEX_BUFFER_SIZE: wgpu::BufferAddress = IDX_SIZE * 1024;
 
+#[derive(Debug, Clone, Copy)]
 pub struct InstanceParams {
     pub position: glam::Vec3,
     pub rotation: glam::Quat,
 }
 
 impl InstanceParams {
+    const GPU_DATA_SIZE: wgpu::BufferAddress =
+        std::mem::size_of::<[f32; 16]>() as wgpu::BufferAddress;
+
     pub fn new(position: glam::Vec3, rotation: glam::Quat) -> Self {
         Self { position, rotation }
     }
@@ -132,9 +136,39 @@ impl InstanceParams {
     pub fn into_array(self) -> [f32; 16] {
         glam::Mat4::from_rotation_translation(self.rotation, self.position).to_cols_array()
     }
+
+    pub const fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride: Self::GPU_DATA_SIZE,
+            step_mode: wgpu::VertexStepMode::Instance, // step mode is per instance
+            attributes: &[
+                // 4 coloumns of the matrix
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5, // not conflicting with the Vertex attributes buffer
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
 }
 
-const NUM_INSTANCES_PER_ROW: usize = 8;
+const NUM_INSTANCES_PER_ROW: usize = 3;
 
 pub struct RenderState {
     #[allow(dead_code)]
@@ -295,6 +329,33 @@ impl RenderState {
             offset,
             bytemuck::cast_slice(&HEXAGON_INDICES),
         );
+
+        const DISPLACEMENT: glam::Vec3 = glam::Vec3::new(
+            NUM_INSTANCES_PER_ROW as f32 * 0.5,
+            0.0,
+            NUM_INSTANCES_PER_ROW as f32 * 0.5,
+        );
+
+        let object_instances = (0..NUM_INSTANCES_PER_ROW)
+            .flat_map(|z| {
+                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                    let n = (x + z * NUM_INSTANCES_PER_ROW) as f32;
+                    let position = glam::Vec3::new(x as f32, -0.5, z as f32) - DISPLACEMENT;
+                    let rotation = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_8 * n);
+                    InstanceParams::new(position, rotation)
+                })
+            })
+            .collect::<Vec<_>>();
+        let object_instances_data = object_instances
+            .iter()
+            .map(|params| params.into_array())
+            .collect::<Vec<_>>();
+        let object_instances_buffer: wgpu::Buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("obj-instances-buffer"),
+                contents: bytemuck::cast_slice(&object_instances_data),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
         let textures = {
             #[cfg(target_arch = "wasm32")]
@@ -464,13 +525,13 @@ impl RenderState {
             vertex: wgpu::VertexState {
                 module: &default_shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::layout()],
+                buffers: &[InstanceParams::layout(), Vertex::layout()],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 unclipped_depth: false, // requires Features::DEPTH_CLIP_CONTROL
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false, // requires Features::CONSERVATIVE_RASTERIZATION
@@ -570,6 +631,8 @@ impl RenderState {
             camera_controller,
             camera_uniform,
             camera_uniform_buffer,
+            object_instances,
+            object_instances_buffer,
         }
     }
 
@@ -669,12 +732,13 @@ impl RenderState {
             render_pass.set_bind_group(0, &self.bind_groups["texture"][self.texture_idx], &[]);
             render_pass.set_bind_group(1, &self.bind_groups["camera"][0], &[]);
             render_pass.set_index_buffer(self.index_buffer.buf.slice(..), IDX_FORMAT);
+            render_pass.set_vertex_buffer(0, self.object_instances_buffer.slice(..));
 
             #[cfg(not(target_arch = "wasm32"))]
             {
                 // Only bind once the vertex buffer and index buffer,
                 // then draw the different slices with vertex and index offset.
-                render_pass.set_vertex_buffer(0, self.vertex_buffer.buf.slice(..));
+                render_pass.set_vertex_buffer(1, self.vertex_buffer.buf.slice(..));
                 self.index_buffer
                     .slices
                     .iter()
@@ -686,13 +750,14 @@ impl RenderState {
                         render_pass.draw_indexed(
                             index_offset..index_offset + count,
                             vertex_offset as i32,
-                            0..1,
+                            0..self.object_instances.len() as u32,
                         );
                     });
             }
 
             #[cfg(target_arch = "wasm32")]
             {
+                println!("wasm32");
                 // Draw elements with base vertex is not supported using webgl.
                 self.index_buffer
                     .slices
@@ -702,11 +767,11 @@ impl RenderState {
                         let vertex_buffer = self.vertex_buffer.buf.slice(vertex_range.clone());
                         let index_offset = (index_range.start / IDX_SIZE) as u32;
                         let count = (index_range.end - index_range.start) / IDX_SIZE;
-                        render_pass.set_vertex_buffer(0, vertex_buffer);
+                        render_pass.set_vertex_buffer(1, vertex_buffer);
                         render_pass.draw_indexed(
                             index_offset..index_offset + count as u32,
                             0,
-                            0..1,
+                            0..self.object_instances.len() as u32,
                         );
                     });
             }
