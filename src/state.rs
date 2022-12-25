@@ -503,6 +503,21 @@ impl RenderState {
                 ],
             });
 
+        let depth_map_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth-map-bind-group"),
+            layout: &depth_map_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&textures["depth"][0].view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&textures["depth"][0].sampler),
+                },
+            ],
+        });
+
         let texture_bind_groups = vec![
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("bind-group-texture-0"),
@@ -573,6 +588,7 @@ impl RenderState {
                 bind_group_layouts: &[
                     &texture_bind_group_layout,
                     &camera_uniform_bind_group_layout,
+                    &depth_map_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -674,6 +690,7 @@ impl RenderState {
         let mut bind_groups = HashMap::new();
         bind_groups.insert("texture", texture_bind_groups);
         bind_groups.insert("camera", vec![camera_uniform_bind_group]);
+        bind_groups.insert("depth_map", vec![depth_map_bind_group]);
 
         Self {
             surface,
@@ -811,6 +828,7 @@ impl RenderState {
                 &[],
             );
             render_pass.set_bind_group(1, &self.bind_groups["camera"][0], &[]);
+            render_pass.set_bind_group(2, &self.bind_groups["depth_map"][0], &[]);
             render_pass.set_index_buffer(self.index_buffer.buf.slice(..), IDX_FORMAT);
             render_pass.set_vertex_buffer(0, self.object_instances_buffer.slice(..));
 

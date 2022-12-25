@@ -46,10 +46,23 @@ var tex: texture_2d<f32>;
 @group(0) @binding(1)
 var spl: sampler;
 
+@group(2) @binding(0)
+var depth_tex: texture_depth_2d;
+@group(2) @binding(1)
+var depth_spl: sampler_comparison;
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // @location(0): stores the output in the first output location(color attachment 0)
     // in fragment shader, @bulitin(position) is the framebuffer coordinate.
     //return vec4<f32>(in.color, 1.0);
-    return textureSample(tex, spl, in.tex_coord);
+
+    let tex_color = textureSample(tex, spl, in.tex_coord);
+    return tex_color;
+
+    // let near = 0.1;
+    // let far = 100.0;
+    // let depth = textureSampleCompare(depth_tex, depth_spl, in.tex_coord, in.clip_position.w);
+    // let r = (2.0 * near) / (far + near - depth * (far - near));
+    // return vec4<f32>(r, r, r, 1.0);
 }
