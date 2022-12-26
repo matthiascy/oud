@@ -1,4 +1,6 @@
+mod assets;
 mod camera;
+mod model;
 mod state;
 mod texture;
 

@@ -14,8 +14,8 @@ impl Texture {
         queue: &wgpu::Queue,
         bytes: &[u8],
         label: &str,
-    ) -> Self {
-        let data = image::load_from_memory(bytes).unwrap().to_rgba8();
+    ) -> anyhow::Result<Self> {
+        let data = image::load_from_memory(bytes)?.to_rgba8();
         let (width, height) = data.dimensions();
         log::info!("Loaded texture {} with size {}x{}", label, width, height);
         let size = wgpu::Extent3d {
@@ -57,14 +57,19 @@ impl Texture {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-        Self {
+        Ok(Self {
             inner: texture,
             view,
             sampler,
-        }
+        })
     }
 
-    pub fn from_file(device: &wgpu::Device, queue: &wgpu::Queue, path: &Path, label: &str) -> Self {
+    pub fn from_file(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: &Path,
+        label: &str,
+    ) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path).expect("Failed to read texture file!");
         Self::from_bytes(device, queue, &bytes, label)
     }
