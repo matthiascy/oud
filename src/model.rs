@@ -1,7 +1,5 @@
 use std::ops::Range;
 
-use wgpu::util::RenderEncoder;
-
 use crate::texture::Texture;
 
 pub trait Vertex: Sized {
@@ -147,7 +145,7 @@ where
         instances: Range<u32>,
     ) {
         let instances = match instances_buffer {
-            Some(buffer) => instances,
+            Some(_) => instances,
             None => 0..1,
         };
 

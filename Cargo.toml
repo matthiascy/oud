@@ -8,14 +8,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "1.0"
-bytemuck = { version = "1.4", features = [ "derive" ] }
+bytemuck = { version = "1.4", features = ["derive"] }
 cfg-if = "1"
+egui = { version = "0.20", features = ["bytemuck"] }
+egui-winit = { version = "0.20" }
 env_logger = "0.10"
 glam = "0.22"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"
 pollster = "0.2"
 tobj = { version = "3.2", features = ["async"] }
+type-map = "0.5"
 winit = "0.27"
 wgpu = "0.14"
 

@@ -1,13 +1,16 @@
 use std::collections::HashMap;
-use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode, WindowEvent};
+use winit::event_loop::EventLoopWindowTarget;
 use winit::window::Window;
 
 use crate::assets;
+use crate::buffer::SlicedBuffer;
 use crate::camera::{Camera, CameraController, CameraUniform};
+use crate::gui::{GuiRenderer, ScreenDescriptor};
 use crate::model::{DrawModel, Model, Vertex, VertexPCT, VertexPTN};
 use crate::texture::Texture;
 
@@ -74,13 +77,6 @@ const HEXAGON_VERTICES: &[VertexPCT] = &[
 ];
 
 const HEXAGON_INDICES: &[Idx] = &[0, 1, 6, 0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 0, 6, 5];
-
-pub struct SlicedBuffer {
-    buf: wgpu::Buffer,
-    #[allow(dead_code)]
-    cap: wgpu::BufferAddress,
-    slices: Vec<Range<wgpu::BufferAddress>>,
-}
 
 const INITIAL_VERTEX_BUFFER_SIZE: wgpu::BufferAddress = VertexPCT::SIZE * 1024;
 const INITIAL_INDEX_BUFFER_SIZE: wgpu::BufferAddress = IDX_SIZE * 1024;
@@ -173,16 +169,125 @@ impl InstanceParams {
 
 const NUM_INSTANCES_PER_ROW: usize = 9;
 
+/// Action to be performed as consequence of a [`wgpu::SurfaceError`]
+pub enum SurfaceErrorAction {
+    /// Do nothing and skip the current frame
+    Skip,
+    /// Recreate the surface, then skip the current frame.
+    Recreate,
+}
+
+pub struct GpuConfiguration {
+    /// Device requirements for requesting a device.
+    pub device_descriptor: wgpu::DeviceDescriptor<'static>,
+    /// Backend API to use.
+    pub backends: wgpu::Backends,
+    /// Present mode used for the primary swapchain(surface).
+    pub present_mode: wgpu::PresentMode,
+    /// Power preference for the GPU.
+    pub power_preference: wgpu::PowerPreference,
+    /// Texture format for the depth buffer.
+    pub depth_format: Option<wgpu::TextureFormat>,
+    /// Callback for handling surface errors.
+    pub on_surface_error: Arc<dyn Fn(wgpu::SurfaceError) -> SurfaceErrorAction>,
+}
+
+impl Default for GpuConfiguration {
+    fn default() -> Self {
+        Self {
+            device_descriptor: wgpu::DeviceDescriptor {
+                label: Some("wgpu_device"),
+                features: wgpu::Features::default(),
+                limits: if cfg!(target_arch = "wasm32") {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                },
+            },
+            backends: wgpu::Backends::PRIMARY | wgpu::Backends::GL,
+            present_mode: wgpu::PresentMode::AutoVsync,
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            depth_format: None,
+            on_surface_error: Arc::new(|err| {
+                if err == wgpu::SurfaceError::Outdated {
+                    // This error occurs when the app is minimized on Windows.
+                    // Silently return here to prevent spamming the console with:
+                    // "The underlying surface has changed, and therefore the swapchain must be updated."
+                } else {
+                    log::warn!("Dropped frame with error: {err}");
+                }
+                SurfaceErrorAction::Skip
+            }),
+        }
+    }
+}
+
+/// Chooses a preferred texture format for the swapchain.
+///
+/// Prefers linear color space if availale, otherwise fall back to the first available format.
+pub fn preferred_surface_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    for &format in formats {
+        match format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm => {
+                return format;
+            }
+            _ => (),
+        }
+    }
+    formats[0]
+}
+
+pub struct SurfaceState {
+    surface: wgpu::Surface,
+    config: wgpu::SurfaceConfiguration,
+}
+
+impl SurfaceState {
+    /// Physical width of the surface in pixels.
+    pub fn width(&self) -> u32 {
+        self.config.width
+    }
+
+    /// Physical height of the surface in pixels.
+    pub fn height(&self) -> u32 {
+        self.config.height
+    }
+
+    pub fn config(&self) -> &wgpu::SurfaceConfiguration {
+        &self.config
+    }
+
+    pub fn surface(&self) -> &wgpu::Surface {
+        &self.surface
+    }
+
+    /// Resizes the surface and updates the swapchain configuration.
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if self.config.width != width || self.config.height != height {
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(device, &self.config);
+        }
+    }
+
+    /// Re-configures the surface with the known configuration.
+    pub fn reconfigure(&self, device: &wgpu::Device) {
+        self.surface.configure(device, &self.config);
+    }
+}
+
 pub struct RenderState {
     #[allow(dead_code)]
     instance: wgpu::Instance,
     #[allow(dead_code)]
     adapter: wgpu::Adapter,
-    pub surface: wgpu::Surface,
+
+    gpu_config: GpuConfiguration,
+
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub surface_config: wgpu::SurfaceConfiguration,
-    pub size: PhysicalSize<u32>,
+    pub surface_state: SurfaceState,
+
     clear_color: wgpu::Color,
     pipelines: HashMap<&'static str, wgpu::RenderPipeline>,
     pub current_pipeline: &'static str,
@@ -198,11 +303,18 @@ pub struct RenderState {
     object_instances: Vec<InstanceParams>,
     object_instances_buffer: wgpu::Buffer,
     model: Model,
+
+    gui_ctx: egui::Context,
+    gui_state: egui_winit::State,
+    gui_renderer: GuiRenderer,
 }
 
 impl RenderState {
-    pub async fn new(window: &Window, clear_color: wgpu::Color) -> Self {
-        let size = window.inner_size();
+    pub async fn new(
+        window: &Window,
+        event_loop: &EventLoopWindowTarget<()>,
+        clear_color: wgpu::Color,
+    ) -> Self {
         let instance = wgpu::Instance::new(wgpu::Backends::all());
         let surface = unsafe { instance.create_surface(window) };
 
@@ -224,25 +336,17 @@ impl RenderState {
             .await
             .unwrap();
 
+        let gpu_config = GpuConfiguration::default();
+
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("device"),
-                    features: wgpu::Features::empty(),
-                    limits: if cfg!(target_arch = "wasm32") {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    },
-                },
-                None,
-            )
+            .request_device(&gpu_config.device_descriptor, None)
             .await
             .unwrap();
 
         // adapter.features(); device.features();
 
         let surface_config = {
+            let size = window.inner_size();
             let formats = surface.get_supported_formats(&adapter);
             println!("Supported surface formats:");
             for format in &formats {
@@ -266,69 +370,63 @@ impl RenderState {
         };
         surface.configure(&device, &surface_config);
 
-        let mut vertex_buffer = {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("vertex-buffer"),
-                size: INITIAL_VERTEX_BUFFER_SIZE,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            SlicedBuffer {
-                buf,
-                cap: INITIAL_VERTEX_BUFFER_SIZE,
-                slices: Vec::new(),
-            }
-        };
+        let mut vertex_buffer = SlicedBuffer::new(
+            &device,
+            INITIAL_VERTEX_BUFFER_SIZE,
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            Some("vertex-buffer"),
+        );
 
         let mut offset: wgpu::BufferAddress = 0;
         let triangle_vertex_buffer_size =
             TRIANGLE_VERTICES.len() as wgpu::BufferAddress * VertexPCT::SIZE;
-        vertex_buffer
-            .slices
-            .push(offset..offset + triangle_vertex_buffer_size);
+        {
+            let ref mut this = vertex_buffer;
+            let range = offset..offset + triangle_vertex_buffer_size;
+            assert!(range.start < range.end && range.end <= this.capacity());
+            this.subslices_mut().push(range);
+        };
         queue.write_buffer(
-            &vertex_buffer.buf,
+            &vertex_buffer.buffer(),
             0,
             bytemuck::cast_slice(TRIANGLE_VERTICES),
         );
         offset += triangle_vertex_buffer_size;
         let hexagon_vertex_buffer_size =
             HEXAGON_VERTICES.len() as wgpu::BufferAddress * VertexPCT::SIZE;
-        vertex_buffer
-            .slices
-            .push(offset..offset + hexagon_vertex_buffer_size);
+        {
+            let ref mut this = vertex_buffer;
+            let range = offset..offset + hexagon_vertex_buffer_size;
+            assert!(range.start < range.end && range.end <= this.capacity());
+            this.subslices_mut().push(range);
+        };
         queue.write_buffer(
-            &vertex_buffer.buf,
+            &vertex_buffer.buffer(),
             offset,
             bytemuck::cast_slice(HEXAGON_VERTICES),
         );
 
-        let mut index_buffer = {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("index-buffer"),
-                size: INITIAL_INDEX_BUFFER_SIZE,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            SlicedBuffer {
-                buf,
-                cap: INITIAL_INDEX_BUFFER_SIZE,
-                slices: Vec::new(),
-            }
-        };
+        let mut index_buffer = SlicedBuffer::new(
+            &device,
+            INITIAL_INDEX_BUFFER_SIZE,
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            Some("index-buffer"),
+        );
         offset = 0;
-        index_buffer.slices.push(offset..offset + 3 * IDX_SIZE);
+        index_buffer
+            .subslices_mut()
+            .push(offset..offset + 3 * IDX_SIZE);
         queue.write_buffer(
-            &index_buffer.buf,
+            &index_buffer.buffer(),
             offset,
             bytemuck::cast_slice(&TRIANGLE_INDICES),
         );
         offset += 3 * IDX_SIZE;
         index_buffer
-            .slices
+            .subslices_mut()
             .push(offset..offset + HEXAGON_INDICES.len() as wgpu::BufferAddress * IDX_SIZE);
         queue.write_buffer(
-            &index_buffer.buf,
+            &index_buffer.buffer(),
             offset,
             bytemuck::cast_slice(&HEXAGON_INDICES),
         );
@@ -384,8 +482,8 @@ impl RenderState {
                     Texture::from_bytes(
                         &device,
                         &queue,
-                        include_bytes!("../assets/damascus.jpg"),
-                        "texture-damascus",
+                        include_bytes!("../assets/cube-diffuse.jpg"),
+                        "texture-cube",
                     )
                     .unwrap(),
                 ]
@@ -421,7 +519,8 @@ impl RenderState {
             "depth",
             vec![Texture::create_depth_texture(
                 &device,
-                &surface_config,
+                surface_config.width,
+                surface_config.height,
                 "depth-texture",
             )],
         );
@@ -769,12 +868,17 @@ impl RenderState {
         bind_groups.insert("camera", vec![camera_uniform_bind_group]);
         bind_groups.insert("depth_map", vec![depth_map_bind_group]);
 
+        let gui_ctx = egui::Context::default();
+        let gui_state = egui_winit::State::new(event_loop);
+        let gui_renderer = GuiRenderer::new(&device, surface_config.format, None, 1);
+
         Self {
-            surface,
             device,
             queue,
-            size,
-            surface_config,
+            surface_state: SurfaceState {
+                surface,
+                config: surface_config,
+            },
             instance,
             adapter,
             clear_color,
@@ -792,20 +896,30 @@ impl RenderState {
             object_instances,
             object_instances_buffer,
             model,
+            gpu_config,
+            gui_ctx,
+            gui_state,
+            gui_renderer,
         }
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
-            self.size = new_size;
-            self.surface_config.width = new_size.width;
-            self.surface_config.height = new_size.height;
-            self.surface.configure(&self.device, &self.surface_config);
+            self.surface_state
+                .resize(&self.device, new_size.width, new_size.height);
         }
         if let Some(depth_textures) = self.textures.get_mut("depth") {
-            depth_textures[0] =
-                Texture::create_depth_texture(&self.device, &self.surface_config, "depth-texture");
+            depth_textures[0] = Texture::create_depth_texture(
+                &self.device,
+                self.surface_state.config.width,
+                self.surface_state.config.height,
+                "depth-texture",
+            );
         }
+    }
+
+    pub fn reconfigure_surface(&mut self) {
+        self.surface_state.reconfigure(&self.device);
     }
 
     #[allow(unused_variables)]
@@ -819,8 +933,8 @@ impl RenderState {
                 WindowEvent::CursorMoved { position, .. } => {
                     print!("CursorMoved: {:?}\r", position);
                     self.clear_color = wgpu::Color {
-                        r: position.x as f64 / self.size.width as f64,
-                        g: position.y as f64 / self.size.height as f64,
+                        r: position.x as f64 / self.surface_state.width() as f64,
+                        g: position.y as f64 / self.surface_state.height() as f64,
                         b: 0.5,
                         a: 1.0,
                     };
@@ -877,18 +991,32 @@ impl RenderState {
         );
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let frame = self.surface.get_current_texture()?;
+    pub fn render(&mut self, window: &Window) -> Result<(), wgpu::SurfaceError> {
+        let frame = self.surface_state.surface().get_current_texture()?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("main-render-encoder"),
-            });
+        let mut main_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("main-render-encoder"),
+                });
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let depth_stencil_attachment =
+                if self.current_pipeline == "model" || self.current_pipeline == "default" {
+                    Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.textures["depth"][0].view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: true,
+                        }),
+                        stencil_ops: None,
+                    })
+                } else {
+                    None
+                };
+
+            let mut render_pass = main_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -898,15 +1026,9 @@ impl RenderState {
                         store: true,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.textures["depth"][0].view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: true,
-                    }),
-                    stencil_ops: None,
-                }),
+                depth_stencil_attachment,
             });
+
             render_pass.set_pipeline(&self.pipelines[self.current_pipeline]);
 
             match self.current_pipeline {
@@ -918,43 +1040,41 @@ impl RenderState {
                     );
                     render_pass.set_bind_group(1, &self.bind_groups["camera"][0], &[]);
                     render_pass.set_bind_group(2, &self.bind_groups["depth_map"][0], &[]);
-                    render_pass.set_index_buffer(self.index_buffer.buf.slice(..), IDX_FORMAT);
+                    render_pass.set_index_buffer(self.index_buffer.data_slice(..), IDX_FORMAT);
                     render_pass.set_vertex_buffer(0, self.object_instances_buffer.slice(..));
 
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         // Only bind once the vertex buffer and index buffer,
                         // then draw the different slices with vertex and index offset.
-                        render_pass.set_vertex_buffer(1, self.vertex_buffer.buf.slice(..));
-                        self.index_buffer
-                            .slices
-                            .iter()
-                            .enumerate()
-                            .for_each(|(i, index_range)| {
+                        render_pass.set_vertex_buffer(1, self.vertex_buffer.data_slice(..));
+                        self.index_buffer.subslices().iter().enumerate().for_each(
+                            |(i, index_range)| {
                                 let count =
                                     ((index_range.end - index_range.start) / IDX_SIZE) as u32;
                                 let index_offset = (index_range.start / IDX_SIZE) as u32;
                                 let vertex_offset =
-                                    self.vertex_buffer.slices[i].start / VertexPCT::SIZE;
+                                    self.vertex_buffer.subslices()[i].start / VertexPCT::SIZE;
                                 render_pass.draw_indexed(
                                     index_offset..index_offset + count,
                                     vertex_offset as i32,
                                     0..self.object_instances.len() as u32,
                                 );
-                            });
+                            },
+                        );
                     }
 
                     #[cfg(target_arch = "wasm32")]
                     {
-                        Println!("wasm32");
+                        println!("wasm32");
                         // Draw elements with base vertex is not supported using webgl.
                         self.index_buffer
-                            .slices
+                            .subslices()
                             .iter()
-                            .zip(self.vertex_buffer.slices.iter())
+                            .zip(self.vertex_buffer.subslices().iter())
                             .for_each(|(index_range, vertex_range)| {
                                 let vertex_buffer =
-                                    self.vertex_buffer.buf.slice(vertex_range.clone());
+                                    self.vertex_buffer.data_slice(vertex_range.clone());
                                 let index_offset = (index_range.start / IDX_SIZE) as u32;
                                 let count = (index_range.end - index_range.start) / IDX_SIZE;
                                 render_pass.set_vertex_buffer(1, vertex_buffer);
@@ -976,8 +1096,74 @@ impl RenderState {
                 _ => {}
             }
         }
+        // Render GUI
+        let screen_descriptor = ScreenDescriptor {
+            physical_width: self.surface_state.width(),
+            physical_height: self.surface_state.height(),
+            scale_factor: window.scale_factor() as _,
+        };
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let raw_input = self.gui_state.take_egui_input(window);
+        let full_output = self.gui_ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                ui.label("Hello World!");
+                if ui.button("Quit").clicked() {
+                    println!("Quit");
+                }
+            });
+        });
+        // hanlde platform output
+        let clipped_primitives = self.gui_ctx.tessellate(full_output.shapes);
+
+        let user_cmd_buffers = {
+            for (id, image_delta) in &full_output.textures_delta.set {
+                self.gui_renderer
+                    .update_texture(&self.device, &self.queue, *id, image_delta);
+            }
+            self.gui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut main_encoder,
+                &clipped_primitives,
+                &screen_descriptor,
+            )
+        };
+
+        let mut gui_encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("main-ui-encoder"),
+            });
+        {
+            let mut gui_render_pass = gui_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main-ui-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            self.gui_renderer
+                .render(&mut gui_render_pass, &clipped_primitives, screen_descriptor);
+        }
+
+        {
+            for id in &full_output.textures_delta.free {
+                self.gui_renderer.free_texture(*id);
+            }
+        }
+
+        self.queue.submit(
+            user_cmd_buffers
+                .into_iter()
+                .chain([main_encoder.finish(), gui_encoder.finish()].into_iter()),
+        );
+
         frame.present();
 
         Ok(())

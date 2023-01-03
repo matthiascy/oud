@@ -1,5 +1,7 @@
 mod assets;
+mod buffer;
 mod camera;
+mod gui;
 mod model;
 mod state;
 mod texture;
@@ -51,7 +53,7 @@ pub async fn run() {
             .expect("failed to get document");
     }
 
-    let mut state = RenderState::new(&window, wgpu::Color::GREEN).await;
+    let mut state = RenderState::new(&window, &event_loop, wgpu::Color::GREEN).await;
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -82,9 +84,9 @@ pub async fn run() {
         }
         Event::RedrawRequested(_) => {
             state.update();
-            match state.render() {
+            match state.render(&window) {
                 Ok(_) => {}
-                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                Err(wgpu::SurfaceError::Lost) => state.reconfigure_surface(),
                 Err(wgpu::SurfaceError::OutOfMemory) => *control_flow = ControlFlow::Exit,
                 Err(e) => eprintln!("{:?}", e),
             }
