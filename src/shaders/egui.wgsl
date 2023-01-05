@@ -10,6 +10,8 @@ struct Locals {
     _padding: vec2<f32>,
 }
 
+@group(0) @binding(0) var<uniform> locals: Locals;
+
 // 0 - 1 linear from 0 - 1 sRGB gamma
 fn linear_from_gamma_rgb(srgb: vec3<f32>) -> vec3<f32> {
     let cutoff = srgb < vec3<f32>(0.04045);
@@ -35,10 +37,10 @@ fn gamma_from_linear_rgba(linear: vec4<f32>) -> vec4<f32> {
 // [u8; 4] srgb as u32 -> [r, g, b, a] in 0 - 1 linear
 fn unpack_color(color: u32) -> vec4<f32> {
     return vec4<f32>(
-        f32(color & 0xFF),
-        f32((color >> 8) & 0xFF),
-        f32((color >> 16) & 0xFF),
-        f32((color >> 24) & 0xFF)
+        f32(color & 255u),
+        f32((color >> 8u) & 255u),
+        f32((color >> 16u) & 255u),
+        f32((color >> 24u) & 255u)
     ) / 255.0;
 }
 
@@ -50,8 +52,6 @@ fn position_from_screen(screen_pos: vec2<f32>) -> vec4<f32> {
         1.0,
     );
 }
-
-@group(0) @binding(0) var<uniform> locals: Locals;
 
 @vertex
 fn vs_main(
@@ -66,6 +66,11 @@ fn vs_main(
     return output;
 }
 
+struct FOutput {
+    @location(0) color0: vec4<f32>,
+    @location(1) color1: vec4<f32>,
+}
+
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var spl: sampler;
 
@@ -75,6 +80,7 @@ fn fs_main_linear_framebuffer(in: VertexOutput) -> @location(0) vec4<f32> {
     let color_linear = textureSample(tex, spl, in.texcoord);
     let color_gamma = gamma_from_linear_rgba(color_linear);
     let output_color_gamma = color_gamma * in.color;
+
     return vec4<f32>(linear_from_gamma_rgb(output_color_gamma.rgb), output_color_gamma.a);
 }
 
@@ -84,5 +90,6 @@ fn fs_main_gamma_framebuffer(in: VertexOutput) -> @location(0) vec4<f32> {
     let color_linear = textureSample(tex, spl, in.texcoord);
     let color_gamma = gamma_from_linear_rgba(color_linear);
     let output_color_gamma = color_gamma * in.color;
+
     return output_color_gamma;
 }

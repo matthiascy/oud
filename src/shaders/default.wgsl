@@ -51,14 +51,24 @@ var depth_tex: texture_depth_2d;
 @group(2) @binding(1)
 var depth_spl: sampler_comparison;
 
+struct FragmentOutput {
+    @location(0) color0: vec4<f32>,
+    @location(1) color1: vec4<f32>,
+}
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> FragmentOutput {
     // @location(0): stores the output in the first output location(color attachment 0)
     // in fragment shader, @bulitin(position) is the framebuffer coordinate.
     //return vec4<f32>(in.color, 1.0);
 
     let tex_color = textureSample(tex, spl, in.tex_coord);
-    return tex_color;
+
+    var out: FragmentOutput;
+    out.color0 = tex_color;
+    out.color1 = tex_color;
+
+    return out;
 
     // let near = 0.1;
     // let far = 100.0;

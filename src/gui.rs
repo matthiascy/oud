@@ -1,15 +1,11 @@
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    num::NonZeroU32,
-    sync::{Arc, RwLock},
-};
+use std::{borrow::Cow, collections::HashMap, num::NonZeroU32};
 
-use crate::buffer::SlicedBuffer;
+use crate::{buffer::SlicedBuffer, state::Response};
 
 use egui::epaint;
 use log::info;
 use type_map::concurrent::TypeMap;
+use winit::{event::WindowEvent, event_loop::EventLoopWindowTarget, window::Window};
 
 type SetupCallback = dyn Fn(
         &wgpu::Device,
@@ -131,7 +127,7 @@ struct GuiUniforms {
 pub struct GuiRenderer {
     // device: Arc<wgpu::Device>,
     // queue: Arc<wgpu::Queue>,
-    // target_format: wgpu::TextureFormat,
+    target_format: wgpu::TextureFormat,
     pipeline: wgpu::RenderPipeline,
     index_buffer: SlicedBuffer,
     vertex_buffer: SlicedBuffer,
@@ -312,6 +308,7 @@ impl GuiRenderer {
             samplers: HashMap::new(),
             next_user_texture_id: 0,
             paint_callback_resources: TypeMap::new(),
+            target_format: output_color_format,
         }
     }
 
@@ -319,7 +316,7 @@ impl GuiRenderer {
         &'rps self,
         render_pass: &mut wgpu::RenderPass<'rps>,
         primitives: &[epaint::ClippedPrimitive],
-        screen_desc: ScreenDescriptor,
+        screen_desc: &ScreenDescriptor,
     ) {
         let pixels_per_point = screen_desc.scale_factor;
         let screen_physical_size = screen_desc.physical_size();
@@ -379,6 +376,7 @@ impl GuiRenderer {
                             self.index_buffer.data_slice(index_buffer_subslice.clone()),
                             wgpu::IndexFormat::Uint32,
                         );
+                        render_pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
                     } else {
                         log::warn!("Missing texture: {:?}", mesh.texture_id);
                     }
@@ -823,9 +821,115 @@ fn create_sampler(
     })
 }
 
-pub struct GuiRenderState {
-    pub device: Arc<wgpu::Device>,
-    pub queue: Arc<wgpu::Queue>,
-    pub target_format: wgpu::TextureFormat,
-    pub renderer: Arc<RwLock<GuiRenderer>>,
+pub struct GuiContext {
+    egui_context: egui::Context,
+    egui_state: egui_winit::State,
+    egui_input: egui::RawInput,
+}
+
+impl GuiContext {
+    pub fn handle_event(&mut self, event: &WindowEvent) -> Response {
+        match self.egui_state.on_event(&self.egui_context, event).consumed {
+            true => Response::Handled,
+            false => Response::Ignored,
+        }
+    }
+}
+
+impl GuiContext {
+    pub fn new(event_loop: &EventLoopWindowTarget<()>) -> Self {
+        Self {
+            egui_context: egui::Context::default(),
+            egui_state: egui_winit::State::new(event_loop),
+            egui_input: egui::RawInput::default(),
+        }
+    }
+
+    pub fn take_input(&mut self, window: &Window) {
+        self.egui_input = self.egui_state.take_egui_input(window);
+    }
+
+    pub fn handle_platform_output(&mut self, window: &Window, output: egui::PlatformOutput) {
+        self.egui_state
+            .handle_platform_output(window, &self.egui_context, output);
+    }
+
+    pub fn run(&mut self, ui: impl FnOnce(&egui::Context)) -> egui::FullOutput {
+        self.egui_context.run(self.egui_input.take(), ui)
+    }
+}
+
+pub struct GuiState {
+    pub context: GuiContext,
+    pub renderer: GuiRenderer,
+}
+
+impl GuiState {
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        event_loop: &EventLoopWindowTarget<()>,
+    ) -> Self {
+        let context = GuiContext::new(event_loop);
+        let renderer = GuiRenderer::new(device, target_format, None, 1);
+        Self { context, renderer }
+    }
+
+    pub fn update(&mut self, window: &Window) {
+        self.context.take_input(window);
+    }
+
+    /// Returns user command buffers and ui rendering command buffer.
+    pub fn render(
+        &mut self,
+        window: &Window,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_desc: ScreenDescriptor,
+        target: &wgpu::TextureView,
+        ui: impl FnOnce(&egui::Context),
+    ) -> (Vec<wgpu::CommandBuffer>, wgpu::CommandBuffer) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gui-encoder"),
+        });
+        let output = self.context.run(ui);
+        self.context
+            .handle_platform_output(&window, output.platform_output);
+
+        let primitives = self.context.egui_context.tessellate(output.shapes);
+
+        let user_command_buffers = {
+            for (id, image_delta) in &output.textures_delta.set {
+                self.renderer
+                    .update_texture(device, queue, *id, image_delta);
+            }
+            self.renderer
+                .update_buffers(device, queue, &mut encoder, &primitives, &screen_desc)
+        };
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("gui_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+            self.renderer
+                .render(&mut render_pass, &primitives, &screen_desc);
+        }
+
+        {
+            for id in &output.textures_delta.free {
+                self.renderer.free_texture(*id);
+            }
+        }
+
+        (user_command_buffers, encoder.finish())
+    }
 }

@@ -1,9 +1,9 @@
 mod assets;
-mod buffer;
+pub mod buffer;
 mod camera;
-mod gui;
+pub mod gui;
 mod model;
-mod state;
+pub mod state;
 mod texture;
 
 use winit::{
@@ -83,7 +83,7 @@ pub async fn run() {
             }
         }
         Event::RedrawRequested(_) => {
-            state.update();
+            state.update(&window);
             match state.render(&window) {
                 Ok(_) => {}
                 Err(wgpu::SurfaceError::Lost) => state.reconfigure_surface(),

@@ -162,6 +162,7 @@ impl SlicedBuffer {
     ) {
         assert!(required_cap > self.cap);
         let new_cap = (self.cap * 2).at_least(required_cap);
+        log::info!("Growing buffer from {} to {}", self.cap, new_cap);
         if copy {
             let new_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
