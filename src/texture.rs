@@ -1,8 +1,7 @@
 use std::path::Path;
 
 pub struct Texture {
-    #[allow(dead_code)]
-    inner: wgpu::Texture,
+    pub(crate) inner: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
 }

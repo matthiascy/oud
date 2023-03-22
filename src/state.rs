@@ -1,3 +1,4 @@
+use log::info;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -293,6 +294,9 @@ pub struct RenderState {
     pub vertex_buffer: SlicedBuffer,
     pub index_buffer: SlicedBuffer,
     textures: HashMap<&'static str, Vec<Texture>>,
+    depth_texture: Texture,
+    depth_texture_offline: Texture,
+    depth_map_bind_group_layout: wgpu::BindGroupLayout,
     bind_groups: HashMap<&'static str, Vec<wgpu::BindGroup>>,
     current_texture_idx: usize,
     camera: Camera,
@@ -512,22 +516,17 @@ impl RenderState {
                 ]
             }
         });
-        textures.insert(
-            "depth",
-            vec![
-                Texture::create_depth_texture(
-                    &device,
-                    surface_config.width,
-                    surface_config.height,
-                    "depth-texture",
-                ),
-                Texture::create_depth_texture(
-                    &device,
-                    surface_config.width / 4,
-                    surface_config.height / 4,
-                    "depth-texture-offline",
-                ),
-            ],
+        let depth_texture = Texture::create_depth_texture(
+            &device,
+            surface_config.width,
+            surface_config.height,
+            "depth-texture",
+        );
+        let depth_texture_offline = Texture::create_depth_texture(
+            &device,
+            surface_config.width / 4,
+            surface_config.height / 4,
+            "depth-texture-offline",
         );
 
         let camera = Camera {
@@ -623,11 +622,11 @@ impl RenderState {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&textures["depth"][0].view),
+                    resource: wgpu::BindingResource::TextureView(&depth_texture.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&textures["depth"][0].sampler),
+                    resource: wgpu::BindingResource::Sampler(&depth_texture.sampler),
                 },
             ],
         });
@@ -638,11 +637,11 @@ impl RenderState {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&textures["depth"][1].view),
+                    resource: wgpu::BindingResource::TextureView(&depth_texture_offline.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&textures["depth"][1].sampler),
+                    resource: wgpu::BindingResource::Sampler(&depth_texture_offline.sampler),
                 },
             ],
         });
@@ -726,7 +725,7 @@ impl RenderState {
                 bind_group_layouts: &[
                     &texture_bind_group_layout,
                     &camera_uniform_bind_group_layout,
-                    &depth_map_bind_group_layout,
+                    //                    &depth_map_bind_group_layout,
                 ],
                 push_constant_ranges: &[],
             });
@@ -763,24 +762,22 @@ impl RenderState {
             fragment: Some(wgpu::FragmentState {
                 module: &default_shader,
                 entry_point: "fs_main",
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: surface_config.format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::Zero,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::Zero,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
                     }),
-                ],
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             multiview: None, // render to array textures
         });
@@ -952,8 +949,10 @@ impl RenderState {
         let mut bind_groups = HashMap::new();
         bind_groups.insert("texture", texture_bind_groups);
         bind_groups.insert("camera", vec![camera_uniform_bind_group]);
-        bind_groups.insert("depth_map", vec![depth_map_bind_group]);
-        bind_groups.insert("offline_depth_map", vec![offline_depth_map_bind_group]);
+        bind_groups.insert(
+            "depth_map",
+            vec![depth_map_bind_group, offline_depth_map_bind_group],
+        );
 
         let mut gui_state = GuiState::new(&device, surface_config.format, event_loop);
         let demos = egui_demo_lib::DemoWindows::default();
@@ -997,6 +996,9 @@ impl RenderState {
             vertex_buffer,
             index_buffer,
             textures,
+            depth_texture,
+            depth_texture_offline,
+            depth_map_bind_group_layout,
             bind_groups,
             current_texture_idx: 0,
             camera,
@@ -1053,20 +1055,50 @@ impl RenderState {
 
         self.gui_state.renderer.free_texture(old_id);
 
-        if let Some(depth_textures) = self.textures.get_mut("depth") {
-            depth_textures[0] = Texture::create_depth_texture(
-                &self.device,
-                self.surface_state.config.width,
-                self.surface_state.config.height,
-                "depth-texture",
-            );
-            depth_textures[1] = Texture::create_depth_texture(
-                &self.device,
-                offline_texture_width,
-                offline_texture_height,
-                "depth-texture-offline",
-            );
-        }
+        self.depth_texture = Texture::create_depth_texture(
+            &self.device,
+            self.surface_state.config.width,
+            self.surface_state.config.height,
+            "depth-texture",
+        );
+
+        self.depth_texture_offline = Texture::create_depth_texture(
+            &self.device,
+            offline_texture_width,
+            offline_texture_height,
+            "depth-texture-offline",
+        );
+
+        let depth_map_bind_groups = self.bind_groups.get_mut("depth_map").unwrap();
+        depth_map_bind_groups[0] = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth-map-bind-group"),
+            layout: &self.depth_map_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.depth_texture.sampler),
+                },
+            ],
+        });
+
+        depth_map_bind_groups[1] = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth-map-bind-group-offline"),
+            layout: &self.depth_map_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_texture_offline.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.depth_texture_offline.sampler),
+                },
+            ],
+        });
     }
 
     pub fn reconfigure_surface(&mut self) {
@@ -1144,21 +1176,6 @@ impl RenderState {
                 label: Some("main-render-encoder"),
             });
         {
-            let depth_view = &self.textures["depth"][0].view;
-            let depth_stencil_attachment =
-                if self.current_pipeline == "model" || self.current_pipeline == "default" {
-                    Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: true,
-                        }),
-                        stencil_ops: None,
-                    })
-                } else {
-                    None
-                };
-
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1169,7 +1186,14 @@ impl RenderState {
                         store: true,
                     },
                 })],
-                depth_stencil_attachment,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
             });
 
             render_pass.set_pipeline(&self.pipelines[self.current_pipeline]);
@@ -1182,7 +1206,7 @@ impl RenderState {
                         &[],
                     );
                     render_pass.set_bind_group(1, &self.bind_groups["camera"][0], &[]);
-                    render_pass.set_bind_group(2, &self.bind_groups["depth_map"][0], &[]);
+                    // render_pass.set_bind_group(2, &self.bind_groups["depth_map"][0], &[]);
                     render_pass.set_index_buffer(self.index_buffer.data_slice(..), IDX_FORMAT);
                     render_pass.set_vertex_buffer(0, self.object_instances_buffer.slice(..));
 
@@ -1246,16 +1270,6 @@ impl RenderState {
                     label: Some("offline-render-encoder"),
                 });
         {
-            let depth_view = &self.textures["depth"][1].view;
-            let depth_stencil_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: true,
-                }),
-                stencil_ops: None,
-            });
-
             let mut render_pass = offline_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("offline-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1266,11 +1280,18 @@ impl RenderState {
                         store: true,
                     },
                 })],
-                depth_stencil_attachment,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture_offline.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
             });
 
             render_pass.set_pipeline(&self.pipelines["offline"]);
-            render_pass.set_bind_group(2, &self.bind_groups["depth_map"][0], &[]);
+            //render_pass.set_bind_group(2, &self.bind_groups["depth_map"][1], &[]);
             render_pass.draw_model(
                 &self.model,
                 &self.bind_groups["camera"][0],
@@ -1311,8 +1332,10 @@ impl RenderState {
         self.queue.submit(
             user_cmds
                 .into_iter()
-                .chain([/*encoder.finish(), */offline_encoder.finish(), ui_cmd].into_iter()),
+                .chain([encoder.finish(), offline_encoder.finish(), ui_cmd].into_iter()),
         );
+
+        // self.queue.submit(std::iter::once(encoder.finish()));
 
         frame.present();
 
