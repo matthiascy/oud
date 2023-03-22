@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use winit::dpi::PhysicalSize;
@@ -10,7 +9,7 @@ use winit::window::Window;
 use crate::assets;
 use crate::buffer::SlicedBuffer;
 use crate::camera::{Camera, CameraController, CameraUniform};
-use crate::gui::{GuiRenderer, GuiState, ScreenDescriptor};
+use crate::gui::{GuiState, ScreenDescriptor};
 use crate::model::{DrawModel, Model, Vertex, VertexPCT, VertexPTN};
 use crate::texture::Texture;
 
@@ -319,17 +318,11 @@ impl RenderState {
         event_loop: &EventLoopWindowTarget<()>,
         clear_color: wgpu::Color,
     ) -> Self {
-        let instance = wgpu::Instance::new(wgpu::Backends::all());
-        let surface = unsafe { instance.create_surface(window) };
-
-        // let adapter = instance
-        //     .enumerate_adapters(wgpu::Backends::all())
-        //     .filter(|adapter| {
-        //         println!("{:?}", adapter.get_info());
-        //         !surface.get_supported_formats(&adapter).is_empty()
-        //     })
-        //     .next()
-        //     .unwrap();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: Default::default(),
+        });
+        let surface = unsafe { instance.create_surface(window) }.expect("Failed to create surface");
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -347,19 +340,17 @@ impl RenderState {
             .await
             .unwrap();
 
-        // adapter.features(); device.features();
-
         let surface_config = {
             let size = window.inner_size();
-            let formats = surface.get_supported_formats(&adapter);
+            let capabilities = surface.get_capabilities(&adapter);
+            let formats = capabilities.formats;
             println!("Supported surface formats:");
             for format in &formats {
                 println!("  - {:?}", format);
             }
 
-            let present_modes = surface.get_supported_present_modes(&adapter);
             println!("Supported surface present modes:");
-            for mode in &present_modes {
+            for mode in &capabilities.present_modes {
                 println!("  - {:?}", mode);
             }
 
@@ -370,6 +361,7 @@ impl RenderState {
                 height: size.height,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: vec![],
             }
         };
         surface.configure(&device, &surface_config);
@@ -494,6 +486,7 @@ impl RenderState {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
+                use std::path::Path;
                 vec![
                     Texture::from_file(
                         &device,
@@ -521,12 +514,20 @@ impl RenderState {
         });
         textures.insert(
             "depth",
-            vec![Texture::create_depth_texture(
-                &device,
-                surface_config.width,
-                surface_config.height,
-                "depth-texture",
-            )],
+            vec![
+                Texture::create_depth_texture(
+                    &device,
+                    surface_config.width,
+                    surface_config.height,
+                    "depth-texture",
+                ),
+                Texture::create_depth_texture(
+                    &device,
+                    surface_config.width / 4,
+                    surface_config.height / 4,
+                    "depth-texture-offline",
+                ),
+            ],
         );
 
         let camera = Camera {
@@ -627,6 +628,21 @@ impl RenderState {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&textures["depth"][0].sampler),
+                },
+            ],
+        });
+
+        let offline_depth_map_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth-map-bind-group-offline"),
+            layout: &depth_map_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&textures["depth"][1].view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&textures["depth"][1].sampler),
                 },
             ],
         });
@@ -764,22 +780,6 @@ impl RenderState {
                         }),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::Zero,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::Zero,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
                 ],
             }),
             multiview: None, // render to array textures
@@ -791,7 +791,7 @@ impl RenderState {
             vertex: wgpu::VertexState {
                 module: &variant_shader,
                 entry_point: "vs_main",
-                buffers: &[VertexPCT::buffer_layout()],
+                buffers: &[InstanceParams::layout(), VertexPCT::buffer_layout()],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -802,7 +802,13 @@ impl RenderState {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false, // requires Features::CONSERVATIVE_RASTERIZATION
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -947,6 +953,7 @@ impl RenderState {
         bind_groups.insert("texture", texture_bind_groups);
         bind_groups.insert("camera", vec![camera_uniform_bind_group]);
         bind_groups.insert("depth_map", vec![depth_map_bind_group]);
+        bind_groups.insert("offline_depth_map", vec![offline_depth_map_bind_group]);
 
         let mut gui_state = GuiState::new(&device, surface_config.format, event_loop);
         let demos = egui_demo_lib::DemoWindows::default();
@@ -954,8 +961,8 @@ impl RenderState {
         let offline_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offline-texture"),
             size: wgpu::Extent3d {
-                width: surface_config.width,
-                height: surface_config.height,
+                width: surface_config.width / 4,
+                height: surface_config.height / 4,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -963,6 +970,7 @@ impl RenderState {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
         });
 
         let offline_texture_view =
@@ -1013,11 +1021,14 @@ impl RenderState {
                 .resize(&self.device, new_size.width, new_size.height);
         }
 
+        let offline_texture_width = new_size.width / 4;
+        let offline_texture_height = new_size.height / 4;
+
         self.offline_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offline-texture"),
             size: wgpu::Extent3d {
-                width: new_size.width,
-                height: new_size.height,
+                width: offline_texture_width,
+                height: offline_texture_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -1025,6 +1036,7 @@ impl RenderState {
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
         });
 
         self.offline_texture_view = self
@@ -1047,6 +1059,12 @@ impl RenderState {
                 self.surface_state.config.width,
                 self.surface_state.config.height,
                 "depth-texture",
+            );
+            depth_textures[1] = Texture::create_depth_texture(
+                &self.device,
+                offline_texture_width,
+                offline_texture_height,
+                "depth-texture-offline",
             );
         }
     }
@@ -1126,10 +1144,11 @@ impl RenderState {
                 label: Some("main-render-encoder"),
             });
         {
+            let depth_view = &self.textures["depth"][0].view;
             let depth_stencil_attachment =
                 if self.current_pipeline == "model" || self.current_pipeline == "default" {
                     Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.textures["depth"][0].view,
+                        view: depth_view,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: true,
@@ -1142,24 +1161,14 @@ impl RenderState {
 
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-render-pass"),
-                color_attachments: &[
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(self.clear_color),
-                            store: true,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &self.offline_texture_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::RED),
-                            store: true,
-                        },
-                    }),
-                ],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color),
+                        store: true,
+                    },
+                })],
                 depth_stencil_attachment,
             });
 
@@ -1237,8 +1246,9 @@ impl RenderState {
                     label: Some("offline-render-encoder"),
                 });
         {
+            let depth_view = &self.textures["depth"][1].view;
             let depth_stencil_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.textures["depth"][0].view,
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: true,
@@ -1247,7 +1257,7 @@ impl RenderState {
             });
 
             let mut render_pass = offline_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main-render-pass"),
+                label: Some("offline-render-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.offline_texture_view,
                     resolve_target: None,
@@ -1260,6 +1270,7 @@ impl RenderState {
             });
 
             render_pass.set_pipeline(&self.pipelines["offline"]);
+            render_pass.set_bind_group(2, &self.bind_groups["depth_map"][0], &[]);
             render_pass.draw_model(
                 &self.model,
                 &self.bind_groups["camera"][0],
@@ -1289,8 +1300,8 @@ impl RenderState {
                         ui.add(egui::ImageButton::new(
                             self.offline_texture_id,
                             egui::Vec2::new(
-                                self.surface_state.width() as _,
-                                self.surface_state.height() as _,
+                                (self.surface_state.width() / 4) as _,
+                                (self.surface_state.height() / 4) as _,
                             ),
                         ))
                     });
@@ -1300,7 +1311,7 @@ impl RenderState {
         self.queue.submit(
             user_cmds
                 .into_iter()
-                .chain([encoder.finish(), offline_encoder.finish(), ui_cmd].into_iter()),
+                .chain([/*encoder.finish(), */offline_encoder.finish(), ui_cmd].into_iter()),
         );
 
         frame.present();

@@ -10,28 +10,31 @@ crate-type = ["cdylib", "rlib"]
 anyhow = "1.0"
 bytemuck = { version = "1.4", features = ["derive"] }
 cfg-if = "1"
-egui = { version = "0.20", features = ["bytemuck"] }
-egui-winit = { version = "0.20" }
-egui_demo_lib = "0.20"
+egui = { version = "0.21", features = ["bytemuck"] }
+# Disable clipboard as dependency arboard (3.2.0) is not compatible with wasm
+egui-winit = { version = "0.21", default-features = false, features = ["links", "wayland"] }
+egui_demo_lib = "0.21"
 env_logger = "0.10"
-glam = "0.22"
+glam = "0.23"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 log = "0.4"
-pollster = "0.2"
+pollster = "0.3"
 tobj = { version = "3.2", features = ["async"] }
 type-map = "0.5"
-winit = "0.27"
-wgpu = "0.14"
+winit = "0.28"
+wgpu = "0.15"
+getrandom = { version = "0.2", features = ["js"] }
 
 [build-dependencies]
 anyhow = "1.0"
 fs_extra = "1.2"
+glob = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
-console_log = "0.2"
+console_log = "1.0"
 reqwest = "0.11"
-wgpu = { version = "0.14", features = ["webgl"] }
+wgpu = { version = "0.15", features = ["webgl"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [

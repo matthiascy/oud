@@ -46,10 +46,10 @@ var tex: texture_2d<f32>;
 @group(0) @binding(1)
 var spl: sampler;
 
-@group(2) @binding(0)
-var depth_tex: texture_depth_2d;
-@group(2) @binding(1)
-var depth_spl: sampler_comparison;
+//@group(2) @binding(0)
+//var depth_tex: texture_depth_2d;
+//@group(2) @binding(1)
+//var depth_spl: sampler_comparison;
 
 struct FragmentOutput {
     @location(0) color0: vec4<f32>,

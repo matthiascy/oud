@@ -21,17 +21,17 @@ fn linear_from_gamma_rgb(srgb: vec3<f32>) -> vec3<f32> {
 }
 
 // 0 - 1 sRGB gamma from 0 - 1 linear
-fn gamma_from_linear_rgb(linear: vec3<f32>) -> vec3<f32> {
-    let cutoff = linear < vec3<f32>(0.0031308);
-    let lower = linear * vec3<f32>(12.92);
-    let higher = vec3<f32>(1.055) * pow(linear, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+fn gamma_from_linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = rgb < vec3<f32>(0.0031308);
+    let lower = rgb * vec3<f32>(12.92);
+    let higher = vec3<f32>(1.055) * pow(rgb, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
     return select(higher, lower, cutoff);
 }
 
 // 0 - 1 sRGBA gamma from 0 - 1 linear
-fn gamma_from_linear_rgba(linear: vec4<f32>) -> vec4<f32> {
-    let rgb = gamma_from_linear_rgb(linear.rgb);
-    return vec4<f32>(rgb, linear.a);
+fn gamma_from_linear_rgba(rgba: vec4<f32>) -> vec4<f32> {
+    let rgb = gamma_from_linear_rgb(rgba.rgb);
+    return vec4<f32>(rgb, rgba.a);
 }
 
 // [u8; 4] srgb as u32 -> [r, g, b, a] in 0 - 1 linear

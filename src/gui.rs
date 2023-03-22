@@ -121,12 +121,10 @@ impl ScreenDescriptor {
 #[repr(C)]
 struct GuiUniforms {
     screen_logical_size: [f32; 2], // in points
-    _padding: [u32; 2],            // Unifor buffers need to be at least 16 bytes in WebGL.
+    _padding: [u32; 2],            // Uniform buffers need to be at least 16 bytes in WebGL.
 }
 
 pub struct GuiRenderer {
-    // device: Arc<wgpu::Device>,
-    // queue: Arc<wgpu::Queue>,
     target_format: wgpu::TextureFormat,
     pipeline: wgpu::RenderPipeline,
     index_buffer: SlicedBuffer,
@@ -504,6 +502,7 @@ impl GuiRenderer {
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb, // minimal emulation wgpu WebGL emulation is WebGL2, so this should always be supported
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
             });
             let sampler = self
                 .samplers
